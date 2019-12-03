@@ -1,0 +1,47 @@
+#!/bin/bash
+
+set -e
+
+if ! which wrapknish > /dev/null; then
+    echo 'wrapknish was not found in your $PATH'
+    exit 1
+fi
+
+aws_sdk=$(go env GOROOT)/src/github.com/aws/aws-sdk-go
+if [ ! -d "$aws_sdk" ]; then
+    aws_sdk=$(go env GOPATH)/src/github.com/aws/aws-sdk-go
+    if [ ! -d "$aws_sdk" ]; then
+        echo 'AWS SDK not found under $GOROOT or $GOPATH'
+        exit 1
+    fi
+fi
+
+rm -rf ./.generated_overrides
+rm -rf ./generated_pkgs
+
+mkdir ./.generated_overrides
+pushd ./.generated_overrides
+python3 ../generate_api_context_go.py "${aws_sdk}"
+popd
+
+mkdir ./generated_pkgs
+pushd ./generated_pkgs
+
+# store the lambda's context object for use in our hooks (if this is a lambda)
+wrapknish -n xray_ -c ../xray_hooks/ -p "github.com/aws/aws-lambda-go/lambda"
+
+# automatically apply xray's wrapper to new client objects in a session
+wrapknish -n xray_ -c ../xray_hooks/ -p "github.com/aws/aws-sdk-go/aws/session"
+
+# use the context object with go's HTTP client
+wrapknish -n xray_ -c ../xray_hooks/ -p "net/http"
+# and merge it into the context already received by ctxhttp
+wrapknish -n xray_ -c ../xray_hooks/ -p "golang.org/x/net/context/ctxhttp"
+
+go list github.com/aws/aws-sdk-go/service/... | grep "github.com\/aws\/aws-sdk-go\/service\/[^\/]*\$" | xargs -L1 wrapknish -n xray_ -c ../.generated_overrides -p
+
+popd
+
+rm -rf ./.generated_overrides
+
+echo "success! output is in ./generated_pkgs"
